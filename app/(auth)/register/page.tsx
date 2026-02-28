@@ -1,8 +1,12 @@
 ﻿import Link from "next/link";
 import Image from "next/image";
-import { GalleryVerticalEnd } from "lucide-react";
+import { GalleryVerticalEnd, QrCode } from "lucide-react";
 import { RegisterForm } from "@/components/register-form";
+import { Button } from "@/components/ui/button";
 import { getSystemSettings } from "@/lib/services/system-settings.service";
+
+const QQ_GROUP_URL =
+  "https://qun.qq.com/universal-share/share?ac=1&authKey=sXDQj%2BGsiyiCBfKScFQDortpyLLcKEHbO0Na%2B74mlnzENfN2QyOWUkLkM2OKg2Fq&busi_data=eyJncm91cENvZGUiOiIxMDY0ODMwNjEzIiwidG9rZW4iOiI5WFRYb083YmpUZWFITFJRMGNscU5aK0cxdzZ6TjlXaDgya2dwdUhpbmNBUThaL0hKTjRNb2xnYUhVNStCSnpMIiwidWluIjoiMzc1MjI2OTcwNyJ9&data=G1IHSBIRzFAl8UQ-JYGTX5-2AOnVmMAKvAngP3sLq4KoXeXwRs-iqV6hcHQHC-YIud9lzGDsbx-uqd7TBuxXQw&svctype=4&tempid=h5_group_info";
 
 export default async function RegisterPage() {
   const { systemName } = await getSystemSettings();
@@ -10,13 +14,19 @@ export default async function RegisterPage() {
   return (
     <main className="bg-background relative min-h-svh">
       <section className="mx-auto flex min-h-svh w-full max-w-md flex-col p-6 md:p-10 lg:hidden">
-        <div className="flex justify-center">
+        <div className="flex items-center justify-between">
           <Link href="/" className="flex items-center gap-2 font-medium">
             <div className="bg-primary text-primary-foreground flex size-6 items-center justify-center rounded-md">
               <GalleryVerticalEnd className="size-4" />
             </div>
             <span>{systemName}</span>
           </Link>
+          <Button asChild variant="ghost">
+            <a href={QQ_GROUP_URL} target="_blank" rel="noopener noreferrer">
+              <QrCode className="size-4" />
+              <span>群聊</span>
+            </a>
+          </Button>
         </div>
 
         <div className="flex flex-1 items-center justify-center">
@@ -49,11 +59,13 @@ export default async function RegisterPage() {
 
         <section className="bg-background relative flex items-center justify-center p-6 md:p-10">
           <div className="absolute inset-0 bg-[radial-gradient(circle_at_20%_30%,rgba(255,255,255,0.35),transparent_45%),radial-gradient(circle_at_80%_70%,rgba(255,255,255,0.2),transparent_40%)]" />
-          <div aria-hidden className="pointer-events-none absolute right-10 top-10 z-20">
-            <div className="relative h-6 w-36">
-              <span className="absolute right-0 top-1/2 size-6 -translate-y-1/2 rounded-full border border-black/80" />
-              <span className="absolute right-8 top-1/2 h-px w-24 -translate-y-1/2 bg-black/80" />
-            </div>
+          <div className="absolute right-6 top-6 z-20 md:right-10 md:top-10">
+            <Button asChild variant="ghost">
+              <a href={QQ_GROUP_URL} target="_blank" rel="noopener noreferrer">
+                <QrCode className="size-4" />
+                <span>群聊</span>
+              </a>
+            </Button>
           </div>
           <div className="relative z-10 w-full max-w-xs">
             <RegisterForm />
