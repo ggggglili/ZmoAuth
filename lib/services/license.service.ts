@@ -1,4 +1,4 @@
-import { BindingTargetType, LicenseStatus, PlanType, PlatformRole, PointTransactionType } from "@prisma/client";
+import { AppMemberRole, BindingTargetType, LicenseStatus, PlanType, PlatformRole, PointTransactionType } from "@prisma/client";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { prisma } from "@/lib/db/prisma";
 import { AppError } from "@/lib/errors";
@@ -7,6 +7,7 @@ import { reserveVerifyNonce } from "@/lib/security/nonce-replay";
 import { getSystemSettings } from "@/lib/services/system-settings.service";
 
 const MAX_TIMESTAMP_OFFSET_MS = 5 * 60 * 1000;
+const LICENSE_TRANSFER_COOLDOWN_MS = 24 * 60 * 60 * 1000;
 
 function isValidDomain(input: string) {
   return /^(?=.{1,253}$)(?!-)(?:[a-z0-9-]{1,63}\.)+[a-z]{2,63}$/.test(input);
@@ -165,6 +166,129 @@ export async function listLicensesForCurrentUser(actor: SessionUser) {
     createdAt: license.createdAt,
     activeBinding: license.bindings[0] ?? null,
   }));
+}
+
+export async function transferLicenseToChildForCurrentUser(
+  actor: SessionUser,
+  licenseId: string,
+  targetUserId: string
+) {
+  if (!targetUserId) {
+    throw new AppError("VALIDATION_ERROR", "目标用户不能为空", 400);
+  }
+  if (targetUserId === actor.id) {
+    throw new AppError("VALIDATION_ERROR", "不能转让给当前账号自己", 400);
+  }
+
+  return prisma.$transaction(async (tx) => {
+    const license = await tx.license.findUnique({
+      where: { id: licenseId },
+      select: {
+        id: true,
+        appId: true,
+        userId: true,
+        status: true,
+        expiresAt: true,
+      },
+    });
+
+    if (!license) throw new AppError("NOT_FOUND", "授权不存在", 404);
+    if (actor.id !== license.userId) {
+      throw new AppError("FORBIDDEN", "仅授权持有人可转让该授权", 403);
+    }
+
+    const effectiveStatus = toEffectiveLicenseStatus(license.status, license.expiresAt);
+    if (effectiveStatus !== LicenseStatus.ACTIVE) {
+      throw new AppError("VALIDATION_ERROR", "当前授权状态不可转让", 400);
+    }
+
+    const actorMember = await tx.appMember.findFirst({
+      where: {
+        appId: license.appId,
+        userId: actor.id,
+        role: { in: [AppMemberRole.OWNER, AppMemberRole.RESELLER] },
+        app: { isDeleted: false },
+      },
+      select: { id: true },
+    });
+    if (!actorMember) {
+      throw new AppError("FORBIDDEN", "当前账号无下级授权转让权限", 403);
+    }
+
+    const targetMember = await tx.appMember.findFirst({
+      where: {
+        appId: license.appId,
+        userId: targetUserId,
+        parentResellerUserId: actor.id,
+        app: { isDeleted: false },
+      },
+      select: {
+        userId: true,
+        user: {
+          select: {
+            email: true,
+          },
+        },
+      },
+    });
+    if (!targetMember) {
+      throw new AppError("FORBIDDEN", "仅可转让给当前账号名下下级用户", 403);
+    }
+
+    const latestTransfer = await tx.auditLog.findFirst({
+      where: {
+        action: "LICENSE_TRANSFER",
+        resourceType: "license",
+        resourceId: license.id,
+      },
+      orderBy: { createdAt: "desc" },
+      select: { createdAt: true },
+    });
+
+    if (latestTransfer && Date.now() - latestTransfer.createdAt.getTime() < LICENSE_TRANSFER_COOLDOWN_MS) {
+      throw new AppError("VALIDATION_ERROR", "同一授权 24 小时内最多转让一次", 429);
+    }
+
+    const clearedBindings = await tx.licenseBinding.updateMany({
+      where: {
+        licenseId: license.id,
+        isActive: true,
+      },
+      data: {
+        isActive: false,
+        unboundAt: new Date(),
+      },
+    });
+
+    await tx.license.update({
+      where: { id: license.id },
+      data: { userId: targetUserId },
+    });
+
+    await tx.auditLog.create({
+      data: {
+        actorId: normalizeAuditActorId(actor.id),
+        action: "LICENSE_TRANSFER",
+        resourceType: "license",
+        resourceId: license.id,
+        details: {
+          appId: license.appId,
+          fromUserId: actor.id,
+          toUserId: targetUserId,
+          toUserEmail: targetMember.user.email,
+          clearedActiveBindings: clearedBindings.count,
+          cooldownHours: 24,
+        },
+      },
+    });
+
+    return {
+      licenseId: license.id,
+      targetUserId,
+      targetUserEmail: targetMember.user.email,
+      clearedBindings: clearedBindings.count,
+    };
+  });
 }
 
 export async function bindLicenseForCurrentUser(

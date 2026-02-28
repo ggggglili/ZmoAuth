@@ -1,4 +1,4 @@
-import { InviteIssuerType, PlatformRole, Prisma } from "@prisma/client";
+import { AppMemberRole, InviteIssuerType, PlatformRole, Prisma } from "@prisma/client";
 import { prisma } from "@/lib/db/prisma";
 import { AppError } from "@/lib/errors";
 import type { SessionUser } from "@/lib/auth/session";
@@ -147,6 +147,30 @@ async function createInvite(input: {
   });
 }
 
+async function resolveInviteAppId(
+  tx: Prisma.TransactionClient,
+  invite: {
+    appId: string | null;
+    issuerType: InviteIssuerType;
+    issuerUserId: string;
+  }
+) {
+  if (invite.appId) return invite.appId;
+  if (invite.issuerType !== InviteIssuerType.RESELLER) return null;
+
+  const issuerMember = await tx.appMember.findFirst({
+    where: {
+      userId: invite.issuerUserId,
+      role: AppMemberRole.RESELLER,
+      app: { isDeleted: false },
+    },
+    orderBy: [{ updatedAt: "desc" }, { createdAt: "desc" }],
+    select: { appId: true },
+  });
+
+  return issuerMember?.appId ?? null;
+}
+
 export async function registerWithInvite(input: {
   email: string;
   passwordHash: string;
@@ -198,11 +222,17 @@ export async function registerWithInvite(input: {
         select: { id: true, email: true, role: true },
       });
 
-      if (invite.appId) {
+      const relationAppId = await resolveInviteAppId(tx, {
+        appId: invite.appId,
+        issuerType: invite.issuerType,
+        issuerUserId: invite.issuerUserId,
+      });
+
+      if (relationAppId) {
         await tx.appMember.upsert({
           where: {
             appId_userId: {
-              appId: invite.appId,
+              appId: relationAppId,
               userId: user.id,
             },
           },
@@ -211,7 +241,7 @@ export async function registerWithInvite(input: {
             parentResellerUserId: invite.issuerType === InviteIssuerType.RESELLER ? invite.issuerUserId : null,
           },
           create: {
-            appId: invite.appId,
+            appId: relationAppId,
             userId: user.id,
             role: "MEMBER",
             parentResellerUserId: invite.issuerType === InviteIssuerType.RESELLER ? invite.issuerUserId : null,

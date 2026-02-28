@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { TopCenterAlert } from "@/components/ui/top-center-alert";
@@ -35,6 +36,21 @@ interface PendingRebind {
   licenseId: string;
   oldTarget: string;
   newTarget: string;
+}
+
+interface TransferChildItem {
+  userId: string;
+  user: {
+    id: string;
+    email: string;
+  };
+}
+
+interface PendingTransfer {
+  licenseId: string;
+  appId: string;
+  licenseKey: string;
+  currentBinding: string | null;
 }
 
 const LICENSE_PAGE_SIZE = 10;
@@ -114,6 +130,11 @@ export default function DashboardLicensesPage() {
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [pendingRebind, setPendingRebind] = useState<PendingRebind | null>(null);
+  const [pendingTransfer, setPendingTransfer] = useState<PendingTransfer | null>(null);
+  const [transferCandidates, setTransferCandidates] = useState<TransferChildItem[]>([]);
+  const [transferTargetUserId, setTransferTargetUserId] = useState("");
+  const [loadingTransferCandidates, setLoadingTransferCandidates] = useState(false);
+  const [canTransferUser, setCanTransferUser] = useState(false);
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(1);
 
@@ -149,6 +170,7 @@ export default function DashboardLicensesPage() {
     const data = (await res.json()) as {
       items?: LicenseItem[];
       licenseRebindCostPoints?: number;
+      canTransferUser?: boolean;
       message?: string;
     };
 
@@ -164,6 +186,13 @@ export default function DashboardLicensesPage() {
         ? data.licenseRebindCostPoints
         : 0;
     setLicenseRebindCostPoints(rebindCostPoints);
+    const nextCanTransferUser = Boolean(data.canTransferUser);
+    setCanTransferUser(nextCanTransferUser);
+    if (!nextCanTransferUser) {
+      setPendingTransfer(null);
+      setTransferCandidates([]);
+      setTransferTargetUserId("");
+    }
     setBindDrafts(Object.fromEntries(list.map((item) => [item.id, item.activeBinding?.bindTarget ?? ""])));
   }
 
@@ -204,6 +233,26 @@ export default function DashboardLicensesPage() {
     }
   }
 
+  async function loadTransferCandidates(appId: string) {
+    setLoadingTransferCandidates(true);
+    try {
+      const res = await fetch(`/api/reseller/apps/${appId}/children`);
+      const data = (await res.json()) as { items?: TransferChildItem[]; message?: string };
+      if (!res.ok) {
+        setTransferCandidates([]);
+        setTransferTargetUserId("");
+        setError(data.message ?? "加载下级用户失败");
+        return;
+      }
+
+      const list = data.items ?? [];
+      setTransferCandidates(list);
+      setTransferTargetUserId(list[0]?.userId ?? "");
+    } finally {
+      setLoadingTransferCandidates(false);
+    }
+  }
+
   function onSubmitClick(item: LicenseItem) {
     const input = bindDrafts[item.id] ?? "";
     const normalized = normalizeBindTarget(input);
@@ -240,6 +289,55 @@ export default function DashboardLicensesPage() {
 
     await submitBind(item, pendingRebind.newTarget);
     setPendingRebind(null);
+  }
+
+  async function onOpenTransfer(item: LicenseItem) {
+    if (!canTransferUser) return;
+    setError(null);
+    setMessage(null);
+    setPendingTransfer({
+      licenseId: item.id,
+      appId: item.appId,
+      licenseKey: item.licenseKey,
+      currentBinding: item.activeBinding?.bindTarget ?? null,
+    });
+    setTransferCandidates([]);
+    setTransferTargetUserId("");
+    await loadTransferCandidates(item.appId);
+  }
+
+  async function onConfirmTransfer() {
+    if (!pendingTransfer) return;
+    if (!transferTargetUserId) {
+      setError("请选择一个下级用户");
+      return;
+    }
+
+    setSubmitting(`transfer:${pendingTransfer.licenseId}`);
+    setError(null);
+    setMessage(null);
+    try {
+      const res = await fetch(`/api/licenses/${pendingTransfer.licenseId}/transfer`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          targetUserId: transferTargetUserId,
+        }),
+      });
+      const data = (await res.json()) as { message?: string };
+      if (!res.ok) {
+        setError(data.message ?? "转让授权失败");
+        return;
+      }
+
+      setMessage(data.message ?? "转让成功，原绑定已清空");
+      setPendingTransfer(null);
+      setTransferCandidates([]);
+      setTransferTargetUserId("");
+      await loadLicenses();
+    } finally {
+      setSubmitting(null);
+    }
   }
 
   return (
@@ -316,6 +414,7 @@ export default function DashboardLicensesPage() {
                       <TableHead>过期时间</TableHead>
                       <TableHead>当前绑定</TableHead>
                       <TableHead>绑定操作</TableHead>
+                      {canTransferUser ? <TableHead>转让操作</TableHead> : null}
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -328,6 +427,7 @@ export default function DashboardLicensesPage() {
                             <TableCell><Skeleton className="h-4 w-32" /></TableCell>
                             <TableCell><Skeleton className="h-4 w-40" /></TableCell>
                             <TableCell><Skeleton className="h-10 w-full rounded-md" /></TableCell>
+                            {canTransferUser ? <TableCell><Skeleton className="h-8 w-24 rounded-md" /></TableCell> : null}
                           </TableRow>
                         ))
                       : null}
@@ -373,11 +473,24 @@ export default function DashboardLicensesPage() {
                                     }
                                     placeholder="请输入域名或 IP:端口"
                                   />
-                                  <Button size="sm" onClick={() => onSubmitClick(item)} disabled={submitting === item.id}>
+                                  <Button size="sm" onClick={() => onSubmitClick(item)} disabled={Boolean(submitting)}>
                                     {submitting === item.id ? "提交中..." : isRebind ? "更换绑定" : "提交绑定"}
                                   </Button>
                                 </div>
                               </TableCell>
+
+                              {canTransferUser ? (
+                                <TableCell>
+                                  <Button
+                                    size="sm"
+                                    variant="outline"
+                                    onClick={() => void onOpenTransfer(item)}
+                                    disabled={Boolean(submitting) || item.status !== "ACTIVE"}
+                                  >
+                                    {submitting === `transfer:${item.id}` ? "转让中..." : "转让用户"}
+                                  </Button>
+                                </TableCell>
+                              ) : null}
                             </TableRow>
                           );
                         })
@@ -423,6 +536,96 @@ export default function DashboardLicensesPage() {
           ) : null}
         </CardContent>
       </Card>
+
+      {canTransferUser ? (
+        <Dialog
+          open={Boolean(pendingTransfer)}
+          onOpenChange={(open) => {
+            if (!open) {
+              setPendingTransfer(null);
+              setTransferCandidates([]);
+              setTransferTargetUserId("");
+            }
+          }}
+        >
+          <DialogContent className="sm:max-w-[520px]">
+            <DialogHeader>
+              <DialogTitle>确认转让授权</DialogTitle>
+              <DialogDescription>仅可转让给自己的下级用户，且同一授权 24 小时内最多转让一次。</DialogDescription>
+            </DialogHeader>
+
+            {pendingTransfer ? (
+              <div className="space-y-3">
+                <div className="space-y-2 rounded-md border p-3 text-sm">
+                  <p>
+                    <span className="text-muted-foreground">授权：</span>
+                    <span className="font-medium">{pendingTransfer.licenseKey}</span>
+                  </p>
+                  <p>
+                    <span className="text-muted-foreground">当前绑定：</span>
+                    <span className="font-medium">{pendingTransfer.currentBinding ?? "未绑定"}</span>
+                  </p>
+                  <p className="text-muted-foreground">转让成功后将自动清空原绑定，目标用户需重新绑定。</p>
+                </div>
+
+                {loadingTransferCandidates ? (
+                  <div className="space-y-2">
+                    <Skeleton className="h-4 w-24" />
+                    <Skeleton className="h-10 w-full rounded-md" />
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    <p className="text-sm text-muted-foreground">转让目标用户</p>
+                    <Select value={transferTargetUserId} onValueChange={setTransferTargetUserId}>
+                      <SelectTrigger>
+                        <SelectValue placeholder="请选择下级用户" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {transferCandidates.map((child) => (
+                          <SelectItem key={child.userId} value={child.userId}>
+                            {child.user.email} ({child.userId.slice(0, 8)}...)
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    {transferCandidates.length === 0 ? (
+                      <p className="text-xs text-muted-foreground">当前应用下暂无可转让的下级用户。</p>
+                    ) : null}
+                  </div>
+                )}
+              </div>
+            ) : null}
+
+            <DialogFooter>
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => {
+                  setPendingTransfer(null);
+                  setTransferCandidates([]);
+                  setTransferTargetUserId("");
+                }}
+                disabled={Boolean(submitting)}
+              >
+                取消
+              </Button>
+              <Button
+                type="button"
+                onClick={() => void onConfirmTransfer()}
+                disabled={
+                  !pendingTransfer ||
+                  loadingTransferCandidates ||
+                  transferCandidates.length === 0 ||
+                  !transferTargetUserId ||
+                  submitting === `transfer:${pendingTransfer.licenseId}`
+                }
+              >
+                {pendingTransfer && submitting === `transfer:${pendingTransfer.licenseId}` ? "转让中..." : "确认转让"}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+      ) : null}
 
       <Dialog open={Boolean(pendingRebind)} onOpenChange={(open) => (!open ? setPendingRebind(null) : null)}>
         <DialogContent className="sm:max-w-[500px]">

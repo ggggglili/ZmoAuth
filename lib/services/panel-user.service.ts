@@ -1,5 +1,6 @@
 ﻿import { AppMemberRole, PlatformRole } from "@prisma/client";
 import type { SessionUser } from "@/lib/auth/session";
+import { InviteIssuerType } from "@prisma/client";
 import { prisma } from "@/lib/db/prisma";
 import { AppError } from "@/lib/errors";
 
@@ -17,6 +18,74 @@ export interface PanelUserItem {
 export interface PanelUsersResult {
   scope: "admin" | "reseller";
   items: PanelUserItem[];
+}
+
+async function repairResellerGlobalInviteMembers(actorId: string) {
+  const managerMember = await prisma.appMember.findFirst({
+    where: {
+      userId: actorId,
+      role: AppMemberRole.RESELLER,
+      app: { isDeleted: false },
+    },
+    orderBy: [{ updatedAt: "desc" }, { createdAt: "desc" }],
+    select: { appId: true },
+  });
+
+  if (!managerMember) return;
+
+  const globalInvites = await prisma.invite.findMany({
+    where: {
+      issuerType: InviteIssuerType.RESELLER,
+      issuerUserId: actorId,
+      appId: null,
+    },
+    select: { id: true },
+  });
+
+  if (globalInvites.length === 0) return;
+
+  const redeemLogs = await prisma.auditLog.findMany({
+    where: {
+      action: "INVITE_REDEEM",
+      resourceType: "invite",
+      resourceId: { in: globalInvites.map((invite) => invite.id) },
+      actorId: { not: null },
+    },
+    orderBy: { createdAt: "desc" },
+    select: { actorId: true },
+  });
+
+  const invitedUserIds = Array.from(
+    new Set(
+      redeemLogs
+        .map((log) => log.actorId)
+        .filter((userIdFromLog): userIdFromLog is string => Boolean(userIdFromLog) && userIdFromLog !== actorId)
+    )
+  );
+
+  if (invitedUserIds.length === 0) return;
+
+  const existingMembers = await prisma.appMember.findMany({
+    where: {
+      appId: managerMember.appId,
+      userId: { in: invitedUserIds },
+    },
+    select: { userId: true },
+  });
+
+  const existingUserIds = new Set(existingMembers.map((member) => member.userId));
+  const missingUserIds = invitedUserIds.filter((userId) => !existingUserIds.has(userId));
+  if (missingUserIds.length === 0) return;
+
+  await prisma.appMember.createMany({
+    data: missingUserIds.map((userId) => ({
+      appId: managerMember.appId,
+      userId,
+      role: AppMemberRole.MEMBER,
+      parentResellerUserId: actorId,
+    })),
+    skipDuplicates: true,
+  });
 }
 
 export async function getPanelSuperiorEmail(actor: SessionUser): Promise<string | null> {
@@ -148,6 +217,8 @@ export async function listPanelUsers(actor: SessionUser): Promise<PanelUsersResu
   if (!hasManagerMembership) {
     throw new AppError("FORBIDDEN", "Forbidden", 403);
   }
+
+  await repairResellerGlobalInviteMembers(actor.id);
 
   const members = await prisma.appMember.findMany({
     where: {
