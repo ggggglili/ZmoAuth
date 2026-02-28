@@ -62,10 +62,7 @@ export default function DashboardDownloadPage() {
   }, [loadData]);
 
   function onDownload(url: string) {
-    const popup = window.open(url, "_blank", "noopener,noreferrer");
-    if (!popup) {
-      window.location.href = url;
-    }
+    window.open(url, "_blank", "noopener,noreferrer");
   }
 
   return (
