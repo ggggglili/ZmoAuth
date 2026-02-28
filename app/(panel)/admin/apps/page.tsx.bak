@@ -1,0 +1,965 @@
+"use client";
+
+import { MoreHorizontal } from "lucide-react";
+import { useCallback, useEffect, useState } from "react";
+import { zodResolver } from "@hookform/resolvers/zod";
+import { useForm } from "react-hook-form";
+import { z } from "zod";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Separator } from "@/components/ui/separator";
+import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
+import { Skeleton } from "@/components/ui/skeleton";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+
+const sheetContentClassName = "w-full overflow-y-auto border-border/70 sm:max-w-md";
+const membersSheetContentClassName = "w-full overflow-y-auto border-border/70 sm:max-w-sm md:max-w-md";
+
+const appSchema = z.object({
+  name: z.string().min(1).max(100),
+  description: z.string().max(1000).optional(),
+  weekPoints: z.number().int().nonnegative(),
+  monthPoints: z.number().int().nonnegative(),
+  yearPoints: z.number().int().nonnegative(),
+  lifetimePoints: z.number().int().nonnegative(),
+});
+
+const versionSchema = z.object({
+  version: z.string().min(1).max(50),
+  downloadUrl: z.string().url().max(2000),
+  releaseNote: z.string().max(2000).optional(),
+});
+
+const updatePolicySchema = z.object({
+  offlineTtlSeconds: z.number().int().min(60).max(604800),
+  forceUpdateMinVersion: z.string().max(50).optional(),
+});
+
+type AppFormData = z.infer<typeof appSchema>;
+type VersionFormData = z.infer<typeof versionSchema>;
+type UpdatePolicyFormData = z.infer<typeof updatePolicySchema>;
+
+interface AppItem {
+  id: string;
+  name: string;
+  description: string | null;
+  weekPoints: number;
+  monthPoints: number;
+  yearPoints: number;
+  lifetimePoints: number;
+  updatedAt: string;
+  _count: { versions: number; members: number };
+}
+
+interface AppDetail {
+  id: string;
+  name: string;
+  description: string | null;
+  weekPoints: number;
+  monthPoints: number;
+  yearPoints: number;
+  lifetimePoints: number;
+}
+
+interface MemberItem {
+  userId: string;
+  role: "OWNER" | "RESELLER" | "MEMBER";
+  user: { id: string; email: string; role: string };
+}
+
+interface DiscountItem {
+  userId: string;
+  email: string;
+  role: string;
+  discountRate: number;
+  updatedAt: string | null;
+}
+
+interface VersionItem {
+  id: string;
+  version: string;
+  downloadUrl: string;
+  releaseNote: string | null;
+  createdAt: string;
+}
+
+interface UpdatePolicyItem {
+  appId: string;
+  offlineTtlSeconds: number;
+  forceUpdateMinVersion: string | null;
+}
+
+interface SdkInfo {
+  appId: string;
+  appName: string;
+  sdkKey: string;
+  sdkSecretPreview: string;
+  updateSignSecretPreview: string;
+  previousSdkSecretPreview: string | null;
+  previousSdkSecretExpiresAt: string | null;
+  previousUpdateSignSecretPreview: string | null;
+  previousUpdateSignSecretExpiresAt: string | null;
+}
+
+type RotateTarget = "SDK_SECRET" | "UPDATE_SIGN_SECRET" | "BOTH";
+
+interface RotateResult {
+  appId: string;
+  sdkSecret: string | null;
+  updateSignSecret: string | null;
+  rotatedAt: string;
+}
+
+function getMemberRoleLabel(role: MemberItem["role"]) {
+  if (role === "OWNER") return "Owner";
+  if (role === "RESELLER") return "Reseller";
+  return "Member";
+}
+
+function getDiscountRoleLabel(role: string) {
+  if (role === "OWNER") return "Owner";
+  if (role === "RESELLER") return "Reseller";
+  if (role === "MEMBER") return "Member";
+  return "Unknown";
+}
+
+function formatDateTime(value: string | null) {
+  if (!value) return "-";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "-";
+  return date.toISOString().slice(0, 19).replace("T", " ");
+}
+
+export default function AdminAppsPage() {
+  const [items, setItems] = useState<AppItem[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [message, setMessage] = useState<string | null>(null);
+  const [activeApp, setActiveApp] = useState<AppItem | null>(null);
+
+  const [createOpen, setCreateOpen] = useState(false);
+  const [editOpen, setEditOpen] = useState(false);
+  const [versionOpen, setVersionOpen] = useState(false);
+  const [policyOpen, setPolicyOpen] = useState(false);
+  const [sdkOpen, setSdkOpen] = useState(false);
+  const [membersOpen, setMembersOpen] = useState(false);
+  const [discountOpen, setDiscountOpen] = useState(false);
+
+  const [members, setMembers] = useState<MemberItem[]>([]);
+  const [discounts, setDiscounts] = useState<DiscountItem[]>([]);
+  const [discountDrafts, setDiscountDrafts] = useState<Record<string, string>>({});
+  const [savingDiscountUserId, setSavingDiscountUserId] = useState<string | null>(null);
+
+  const [versions, setVersions] = useState<VersionItem[]>([]);
+  const [sdkInfo, setSdkInfo] = useState<SdkInfo | null>(null);
+  const [rotateResult, setRotateResult] = useState<RotateResult | null>(null);
+  const [rotating, setRotating] = useState<RotateTarget | null>(null);
+  const [downloadingSdk, setDownloadingSdk] = useState(false);
+
+  const createForm = useForm<AppFormData>({
+    resolver: zodResolver(appSchema),
+    defaultValues: {
+      name: "",
+      description: "",
+      weekPoints: 10,
+      monthPoints: 30,
+      yearPoints: 300,
+      lifetimePoints: 999,
+    },
+  });
+
+  const editForm = useForm<AppFormData>({
+    resolver: zodResolver(appSchema),
+    defaultValues: {
+      name: "",
+      description: "",
+      weekPoints: 0,
+      monthPoints: 0,
+      yearPoints: 0,
+      lifetimePoints: 0,
+    },
+  });
+
+  const versionForm = useForm<VersionFormData>({
+    resolver: zodResolver(versionSchema),
+    defaultValues: { version: "", downloadUrl: "", releaseNote: "" },
+  });
+
+  const policyForm = useForm<UpdatePolicyFormData>({
+    resolver: zodResolver(updatePolicySchema),
+    defaultValues: { offlineTtlSeconds: 900, forceUpdateMinVersion: "" },
+  });
+
+  const loadApps = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await fetch("/api/admin/apps");
+      const data = (await res.json()) as { items?: AppItem[]; message?: string };
+      if (!res.ok) {
+        setError(data.message ?? "鍔犺浇搴旂敤澶辫触");
+        setItems([]);
+        return;
+      }
+      setItems(data.items ?? []);
+    } catch {
+      setError("鍔犺浇搴旂敤澶辫触");
+      setItems([]);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadApps();
+  }, [loadApps]);
+
+  async function onCreateApp(values: AppFormData) {
+    setError(null);
+    setMessage(null);
+    const res = await fetch("/api/admin/apps", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(values),
+    });
+    const data = (await res.json()) as { message?: string };
+    if (!res.ok) {
+      setError(data.message ?? "闂佸憡甯楃粙鎴犵磽閹惧瓨鍎熼柡鍐ㄥ€归弳蹇擃熆閹壆绨块悷?);
+      return;
+    }
+    setMessage("闁圭厧鐡ㄥ濠氬极閵堝绀嗘繛鎴烆焽缁憋箓鏌熺€涙ê濮囧┑?);
+    setCreateOpen(false);
+    createForm.reset({
+      name: "",
+      description: "",
+      weekPoints: 10,
+      monthPoints: 30,
+      yearPoints: 300,
+      lifetimePoints: 999,
+    });
+    await loadApps();
+  }
+
+  async function onDeleteApp(appId: string) {
+    if (!window.confirm("缂佺虎鍙庨崰娑㈩敇婵犳艾绀嗛柣妯肩帛閻濈喖鎮归崶銉ュ姎缂併劍鐓￠幃浠嬪Ω閵夛箑浜遍梺鎸庣〒閸犳劙顢楀┑瀣鐎广儱瀚粙濠傗槈閹捐崵绱伴柦鍌氼儔瀹曟岸鎮╃紒妯煎綉闂?)) return;
+    setError(null);
+    setMessage(null);
+    const res = await fetch(`/api/admin/apps/${appId}`, { method: "DELETE" });
+    const data = (await res.json()) as { message?: string };
+    if (!res.ok) {
+      setError(data.message ?? "闂佸憡甯炴繛鈧繛鍛閹棃寮崒娑欐婵犮垺鍎肩划鍓ф喆?);
+      return;
+    }
+    setMessage("闁圭厧鐡ㄥ濠氬极閵堝拋鍟呴柟缁樺笒閻忊晠姊?);
+    await loadApps();
+  }
+
+  async function openEdit(app: AppItem) {
+    setError(null);
+    setMessage(null);
+    setActiveApp(app);
+    setEditOpen(true);
+    const res = await fetch(`/api/admin/apps/${app.id}`);
+    const data = (await res.json()) as { app?: AppDetail; message?: string };
+    if (!res.ok || !data.app) {
+      setError(data.message ?? "闂佸憡姊绘慨鎯归崶銊﹀劅闁哄啫鍊归弳蹇擃熆閹壆绨块悷?);
+      return;
+    }
+    editForm.reset({
+      name: data.app.name,
+      description: data.app.description ?? "",
+      weekPoints: data.app.weekPoints,
+      monthPoints: data.app.monthPoints,
+      yearPoints: data.app.yearPoints,
+      lifetimePoints: data.app.lifetimePoints,
+    });
+  }
+
+  async function onSaveApp(values: AppFormData) {
+    if (!activeApp) return;
+    setError(null);
+    setMessage(null);
+    const res = await fetch(`/api/admin/apps/${activeApp.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(values),
+    });
+    const data = (await res.json()) as { message?: string };
+    if (!res.ok) {
+      setError(data.message ?? "婵烇絽娲︾换鍌炴偤閵婏附鍎熼柡鍐ㄥ€归弳蹇擃熆閹壆绨块悷?);
+      return;
+    }
+    setMessage("闁圭厧鐡ㄥ濠氬极閵堝棛鈹嶆繝闈涙閹界娀鏌熺€涙ê濮囧┑?);
+    await loadApps();
+  }
+
+  async function openVersions(app: AppItem) {
+    setError(null);
+    setMessage(null);
+    setActiveApp(app);
+    setVersionOpen(true);
+    const res = await fetch(`/api/admin/apps/${app.id}/versions`);
+    const data = (await res.json()) as { items?: VersionItem[]; message?: string };
+    if (!res.ok) {
+      setError(data.message ?? "闂佸憡姊绘慨鎯归崶顒佸亱闁割偆鍠愰幏鍗烆熆閹壆绨块悷?);
+      setVersions([]);
+      return;
+    }
+    setVersions(data.items ?? []);
+  }
+
+  async function onCreateVersion(values: VersionFormData) {
+    if (!activeApp) return;
+    setError(null);
+    setMessage(null);
+    const res = await fetch(`/api/admin/apps/${activeApp.id}/versions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(values),
+    });
+    const data = (await res.json()) as { message?: string };
+    if (!res.ok) {
+      setError(data.message ?? "闂佸憡甯楃粙鎴犵磽閹剧粯鍋嬮柛顐ゅ枑閹峰崬顭块幆鎵翱閻?);
+      return;
+    }
+    setMessage("闂佺粯顨呴悧濠傦耿娴兼潙绀嗘繛鎴烆焽缁憋箓鏌熺€涙ê濮囧┑?);
+    versionForm.reset({ version: "", downloadUrl: "", releaseNote: "" });
+    await openVersions(activeApp);
+    await loadApps();
+  }
+
+  async function onEditVersion(item: VersionItem) {
+    if (!activeApp) return;
+    const downloadUrl = window.prompt("闁荤姴娲ㄩ弻澶屾椤撱垹绀傞柕澶涢檮閻撯偓闂佹眹鍔岀€氼亞绮崨顔藉闁芥ê顦伴崟楣冩煕瑜夐崑鎾绘煥?, item.downloadUrl);
+    if (!downloadUrl) return;
+    const releaseNote = window.prompt("闁荤姴娲ㄩ弻澶屾椤撱垹绀傞柕澶涢檮閻撯偓闂佹眹鍔岀€氼厼煤閸ф妫橀柟宄扮焾閸ゆ盯鏌￠崟顐㈠毐缂佽鲸鐟╁畷锝夘敍閻愨晛浜惧鑸电〒缁€鍡涙煥?, item.releaseNote ?? "") ?? "";
+    setError(null);
+    setMessage(null);
+    const res = await fetch(`/api/admin/apps/${activeApp.id}/versions/${item.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        downloadUrl,
+        releaseNote: releaseNote.trim() ? releaseNote.trim() : null,
+      }),
+    });
+    const data = (await res.json()) as { message?: string };
+    if (!res.ok) {
+      setError(data.message ?? "闂佸搫娲ら悺銊╁蓟婵犲洦鍋嬮柛顐ゅ枑閹峰崬顭块幆鎵翱閻?);
+      return;
+    }
+    setMessage("闂佺粯顨呴悧濠傦耿娴兼潙鍗抽悗娑櫳戦悡鈧梺鐟扮摠閸旀洘鎱?);
+    await openVersions(activeApp);
+  }
+
+  async function onDeleteVersion(item: VersionItem) {
+    if (!activeApp) return;
+    if (!window.confirm("缂佺虎鍙庨崰娑㈩敇婵犳艾绀嗛柣妯肩帛閻濈喖鎮归崶銉ュ姢濠⒀勵殜瀵敻顢楅埀顒勫箖瑜旈弫?)) return;
+    setError(null);
+    setMessage(null);
+    const res = await fetch(`/api/admin/apps/${activeApp.id}/versions/${item.id}`, { method: "DELETE" });
+    const data = (await res.json()) as { message?: string };
+    if (!res.ok) {
+      setError(data.message ?? "闂佸憡甯炴繛鈧繛鍛叄閹囧醇閻斿憡瀚虫繝銏″劶缁墽鎲?);
+      return;
+    }
+    setMessage("闂佺粯顨呴悧濠傦耿閺夋鍟呴柟缁樺笒閻忊晠姊?);
+    await openVersions(activeApp);
+    await loadApps();
+  }
+
+  async function openPolicy(app: AppItem) {
+    setError(null);
+    setMessage(null);
+    setActiveApp(app);
+    setPolicyOpen(true);
+    const res = await fetch(`/api/admin/apps/${app.id}/update-policy`);
+    const data = (await res.json()) as { policy?: UpdatePolicyItem; message?: string };
+    if (!res.ok) {
+      setError(data.message ?? "闂佸憡姊绘慨鎯归崶顒€鍗抽悗娑櫳戦悡鈧紓浣圭⊕閻楁粓寮抽幇顓炵窞閺夊牜鍋夎");
+      return;
+    }
+    policyForm.reset({
+      offlineTtlSeconds: data.policy?.offlineTtlSeconds ?? 900,
+      forceUpdateMinVersion: data.policy?.forceUpdateMinVersion ?? "",
+    });
+  }
+
+  async function onSavePolicy(values: UpdatePolicyFormData) {
+    if (!activeApp) return;
+    setError(null);
+    setMessage(null);
+    const res = await fetch(`/api/admin/apps/${activeApp.id}/update-policy`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        offlineTtlSeconds: values.offlineTtlSeconds,
+        forceUpdateMinVersion: values.forceUpdateMinVersion?.trim() ? values.forceUpdateMinVersion.trim() : null,
+      }),
+    });
+    const data = (await res.json()) as { message?: string };
+    if (!res.ok) {
+      setError(data.message ?? "婵烇絽娲︾换鍌炴偤閵娾晛鍗抽悗娑櫳戦悡鈧紓浣圭⊕閻楁粓寮抽幇顓炵窞閺夊牜鍋夎");
+      return;
+    }
+    setMessage("闂佸搫娲ら悺銊╁蓟婵犲嫮椹抽柡宥庡亝濞堬絿鈧鐡曞鎾舵崲濮樻墎鍋?);
+  }
+
+  async function openSdk(app: AppItem) {
+    setError(null);
+    setMessage(null);
+    setActiveApp(app);
+    setSdkOpen(true);
+    setRotateResult(null);
+    const res = await fetch(`/api/admin/apps/${app.id}/sdk`);
+    const data = (await res.json()) as { sdk?: SdkInfo; message?: string };
+    if (!res.ok || !data.sdk) {
+      setError(data.message ?? "闂佸憡姊绘慨鎯?SDK 婵烇絽娲犻崜婵囧閸涱喖绶為弶鍫亯琚?);
+      setSdkInfo(null);
+      return;
+    }
+    setSdkInfo(data.sdk);
+  }
+
+  async function onRotateSecrets(target: RotateTarget) {
+    if (!activeApp) return;
+    setRotating(target);
+    setError(null);
+    setMessage(null);
+    setRotateResult(null);
+    try {
+      const res = await fetch(`/api/admin/apps/${activeApp.id}/sdk/rotate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ target }),
+      });
+      const data = (await res.json()) as { result?: RotateResult; message?: string };
+      if (!res.ok || !data.result) {
+        setError(data.message ?? "闁哄鍎愰崰妤€鐣烽懠顑藉亾闂堟稒顥㈤柟鍛婄矋瀵板嫭娼忛銉?);
+        return;
+      }
+      setRotateResult(data.result);
+      setMessage("闁诲酣娼уΛ婵嬪箰濠婂喚鍟呴柤鐓庡閺嬪倿鏌?);
+      await openSdk(activeApp);
+    } finally {
+      setRotating(null);
+    }
+  }
+
+  function onDownloadSdk() {
+    if (!activeApp) return;
+    setDownloadingSdk(true);
+    window.location.href = `/api/admin/apps/${activeApp.id}/sdk/download`;
+    setTimeout(() => setDownloadingSdk(false), 1000);
+  }
+
+  async function openMembers(app: AppItem) {
+    setError(null);
+    setMessage(null);
+    setActiveApp(app);
+    setMembersOpen(true);
+    const res = await fetch(`/api/admin/apps/${app.id}/members`);
+    const data = (await res.json()) as { items?: MemberItem[]; message?: string };
+    if (!res.ok) {
+      setError(data.message ?? "闂佸憡姊绘慨鎯归崶顒€绠ｉ柟閭﹀墯閸犲懎顭块幆鎵翱閻?);
+      setMembers([]);
+      return;
+    }
+    setMembers(data.items ?? []);
+  }
+
+  async function openDiscounts(app: AppItem) {
+    setError(null);
+    setMessage(null);
+    setActiveApp(app);
+    setDiscountOpen(true);
+    const res = await fetch(`/api/admin/apps/${app.id}/reseller-discounts`);
+    const data = (await res.json()) as { items?: DiscountItem[]; message?: string };
+    if (!res.ok) {
+      setError(data.message ?? "闂佸憡姊绘慨鎯归崶顒€绠俊顖濐嚙閳峰繐顭块幆鎵翱閻?);
+      setDiscounts([]);
+      return;
+    }
+    const list = data.items ?? [];
+    setDiscounts(list);
+    setDiscountDrafts(Object.fromEntries(list.map((item) => [item.userId, String(item.discountRate)])));
+  }
+
+  async function onSaveDiscount(userId: string) {
+    if (!activeApp) return;
+    const discountRate = Number(discountDrafts[userId]);
+    if (!Number.isFinite(discountRate) || discountRate <= 0 || discountRate > 1) {
+      setError("闂佺鍩栬摫濠⒀咁焾琚欓柡鍌氬⒔娴兼劙鐓崶褎鍤囬柕鍡楃箲瀵板嫯顦辩紒?0 婵炴垶鎸婚弻銊╂儍椤掍胶顩查幖杈剧悼閹肩厧霉?1");
+      return;
+    }
+    setSavingDiscountUserId(userId);
+    setError(null);
+    setMessage(null);
+    try {
+      const res = await fetch(`/api/admin/apps/${activeApp.id}/reseller-discounts/${userId}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ discountRate }),
+      });
+      const data = (await res.json()) as { message?: string };
+      if (!res.ok) {
+        setError(data.message ?? "婵烇絽娲︾换鍌炴偤閵娾晛绠俊顖濐嚙閳峰繐顭块幆鎵翱閻?);
+        return;
+      }
+      setMessage("闂佺鍩栬摫濠⒀咁焾椤斿繘鐓鐘殿啍闁?);
+      await openDiscounts(activeApp);
+    } finally {
+      setSavingDiscountUserId(null);
+    }
+  }
+
+  return (
+    <div className="space-y-4">
+      {error ? (
+        <Alert>
+          <AlertTitle>闂佺懓鐏濈粔宕囩礊閺冣偓瀵板嫭娼忛銉?/AlertTitle>
+          <AlertDescription>{error}</AlertDescription>
+        </Alert>
+      ) : null}
+      {message ? (
+        <Alert>
+          <AlertTitle>闂佺懓鐏濈粔宕囩礊閺冨牆绠ｉ柟閭﹀墮椤?/AlertTitle>
+          <AlertDescription>{message}</AlertDescription>
+        </Alert>
+      ) : null}
+
+      <Card className="border-border/70 shadow-none">
+        <CardHeader className="flex flex-row items-start justify-between gap-4">
+          <div className="space-y-1">
+            <CardTitle>闁圭厧鐡ㄥ濠氬极閵堝绀嗘俊銈呭閳?/CardTitle>
+            <CardDescription>{loading ? "闂佸憡姊绘慨鎯归崶銊р枖?.." : `闂?${items.length} 婵炴垶鎼╂禍婊呰姳閺屻儲鍋ㄩ柍鐑樿祴</CardDescription>
+          </div>
+          <Sheet open={createOpen} onOpenChange={setCreateOpen}>
+            <SheetTrigger asChild>
+              <Button>闂佸搫鍊瑰妯肩磽閹惧瓨鍎熼柡鍐ㄥ€归弳?/Button>
+            </SheetTrigger>
+            <SheetContent side="right" className={sheetContentClassName}>
+              <SheetHeader>
+                <SheetTitle>闂佸搫鍊瑰妯肩磽閹惧瓨鍎熼柡鍐ㄥ€归弳?/SheetTitle>
+                <SheetDescription>闂佸憡甯楃粙鎴犵磽閹惧鈻旈柍褜鍓氱粙澶愵敂閸涱喚鍘愰柟鐓庣摠濮婂寮妶澶屽祦闁割偅娲栫敮宕囩磽閸愭儳鏋ょ悮褔鏌涢幒鎴烆棥妞ゎ偄顦靛畷姘枎瀹ヤ礁浜?/SheetDescription>
+              </SheetHeader>
+              <div className="p-4">
+                <Card className="border-border/70 shadow-none">
+                  <CardContent className="space-y-4 p-4">
+                    <div className="space-y-1">
+                      <CardTitle className="text-sm">闂佺硶鏅炲▍锝夈€侀崨顔锯攳闁斥晛鍟╃槐?/CardTitle>
+                      <CardDescription>闁圭厧鐡ㄥ濠氬极閵堝瑙︾€广儱娉﹂悙瀵糕枖閹煎瓨绻勯惌娆戠磽?/CardDescription>
+                    </div>
+                    <form className="space-y-4" onSubmit={createForm.handleSubmit(onCreateApp)}>
+                      <div className="space-y-2">
+                        <Label htmlFor="create-name">闂佸憡鑹剧粔鎯扳叿</Label>
+                        <Input id="create-name" {...createForm.register("name")} />
+                      </div>
+                      <div className="space-y-2">
+                        <Label htmlFor="create-description">婵炲濮撮鍥╁垝?/Label>
+                        <Input id="create-description" {...createForm.register("description")} />
+                      </div>
+                      <Separator />
+                      <div className="space-y-1">
+                        <CardTitle className="text-sm">缂備礁顦介崹浼村垂鎼淬劍鐓€鐎广儱娲ㄩ弸?/CardTitle>
+                        <CardDescription>闂佸憡鑹剧€氼厼顔忛崸妤€绾ч柛鎰典海椤箓鏌涢妸銉剳婵炲牊鍨堕—鈧俊顖涱儥閸氬洨绱掓径妯虹仩闁?/CardDescription>
+                      </div>
+                      <div className="space-y-2">
+                        <Label htmlFor="create-week">闂佸憡绋忛崝灞界暦鏉堚晝鐭撴い鏍ㄨ壘閻?/Label>
+                        <Input id="create-week" type="number" {...createForm.register("weekPoints", { valueAsNumber: true })} />
+                      </div>
+                      <div className="space-y-2">
+                        <Label htmlFor="create-month">闂佸搫鐗嗛悧鍡楃暦鏉堚晝鐭撴い鏍ㄨ壘閻?/Label>
+                        <Input id="create-month" type="number" {...createForm.register("monthPoints", { valueAsNumber: true })} />
+                      </div>
+                      <div className="space-y-2">
+                        <Label htmlFor="create-year">濡ょ姷鍋炲娆忕暦鏉堚晝鐭撴い鏍ㄨ壘閻?/Label>
+                        <Input id="create-year" type="number" {...createForm.register("yearPoints", { valueAsNumber: true })} />
+                      </div>
+                      <div className="space-y-2">
+                        <Label htmlFor="create-life">濠殿喗锕㈤弲鑼不濞嗘垹鐭撴い鏍ㄨ壘閻?/Label>
+                        <Input
+                          id="create-life"
+                          type="number"
+                          {...createForm.register("lifetimePoints", { valueAsNumber: true })}
+                        />
+                      </div>
+                      <Button className="w-full" type="submit" disabled={createForm.formState.isSubmitting}>
+                        {createForm.formState.isSubmitting ? "闂佸憡甯楃粙鎴犵磽閹惧鈻?.." : "闂佸憡甯楃粙鎴犵磽閹惧瓨鍎熼柡鍐ㄥ€归弳?}
+                      </Button>
+                    </form>
+                  </CardContent>
+                </Card>
+              </div>
+            </SheetContent>
+          </Sheet>
+        </CardHeader>
+        <CardContent>
+          <div className="w-full overflow-x-auto">
+            <Table className="min-w-[1180px] whitespace-nowrap [&_th]:px-2 [&_td]:px-2">
+              <TableHeader>
+                <TableRow>
+                  <TableHead className="w-20 whitespace-nowrap pr-8 text-center">闁瑰灝绉崇紞?/TableHead>
+                  <TableHead className="pl-8">闁告艾绉惰ⅷ</TableHead>
+                  <TableHead>濞寸姴顑囩划?/TableHead>
+                  <TableHead>缂佸鍨伴崹搴ㄦ煀瀹ュ洨鏋?/TableHead>
+                  <TableHead>缂備胶鍠曢?/TableHead>
+                  <TableHead>闁哄洤鐡ㄩ弻濠囧籍閸洘锛?/TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {loading
+                  ? Array.from({ length: 6 }).map((_, index) => (
+                      <TableRow key={`apps-loading-${index}`}>
+                        <TableCell className="whitespace-nowrap pr-8 text-center">
+                          <div className="flex justify-center">
+                            <Skeleton className="h-8 w-8 rounded-md" />
+                          </div>
+                        </TableCell>
+                        <TableCell className="pl-8">
+                          <Skeleton className="h-4 w-24" />
+                        </TableCell>
+                        <TableCell>
+                          <Skeleton className="h-4 w-40" />
+                        </TableCell>
+                        <TableCell>
+                          <Skeleton className="h-4 w-56" />
+                        </TableCell>
+                        <TableCell>
+                          <Skeleton className="h-4 w-24" />
+                        </TableCell>
+                        <TableCell>
+                          <Skeleton className="h-4 w-36" />
+                        </TableCell>
+                      </TableRow>
+                    ))
+                  : items.map((item) => (
+                      <TableRow key={item.id}>
+                        <TableCell className="whitespace-nowrap pr-8 text-center">
+                          <DropdownMenu>
+                            <DropdownMenuTrigger asChild>
+                              <Button aria-label="闁哄洦娼欓ˇ鍧楀箼瀹ュ嫮绋? size="icon" variant="ghost">
+                                <MoreHorizontal className="h-4 w-4" />
+                              </Button>
+                            </DropdownMenuTrigger>
+                            <DropdownMenuContent
+                              align="start"
+                              sideOffset={6}
+                              collisionPadding={{ left: 8, right: 8 }}
+                            >
+                              <DropdownMenuItem onSelect={() => void openEdit(item)}>缂傚倹鐗炵欢顐ｆ償閺冨倹鏆?/DropdownMenuItem>
+                              <DropdownMenuItem onSelect={() => void openVersions(item)}>闁哄倹婢橀·鍐偋閸喐鎷?/DropdownMenuItem>
+                              <DropdownMenuItem onSelect={() => void openPolicy(item)}>闁哄洤鐡ㄩ弻濠勭驳閺嶎偅娈?/DropdownMenuItem>
+                              <DropdownMenuItem onSelect={() => void openSdk(item)}>SDK 濞戞挸楠搁惁鎴︽煢?/DropdownMenuItem>
+                              <DropdownMenuItem onSelect={() => void openMembers(item)}>闁瑰瓨鍔曢幉宕囩不閿涘嫭鍊?/DropdownMenuItem>
+                              <DropdownMenuItem onSelect={() => void openDiscounts(item)}>闁瑰瓨鍔曢幉鎶藉箮濡鈷?/DropdownMenuItem>
+                              <DropdownMenuSeparator />
+                              <DropdownMenuItem variant="destructive" onSelect={() => void onDeleteApp(item.id)}>
+                                闁告帞濞€濞呭孩鎯旈弮鍌涙殢
+                              </DropdownMenuItem>
+                            </DropdownMenuContent>
+                          </DropdownMenu>
+                        </TableCell>
+                        <TableCell className="font-medium whitespace-nowrap pl-8">{item.name}</TableCell>
+                        <TableCell className="max-w-[320px] whitespace-nowrap">
+                          <p className="truncate text-xs text-muted-foreground">{item.description ?? "-"}</p>
+                        </TableCell>
+                        <TableCell className="text-xs whitespace-nowrap">
+                          闁?{item.weekPoints} / 闁?{item.monthPoints} / 妤?{item.yearPoints} / 婵﹢鏅茬粻?{item.lifetimePoints}
+                        </TableCell>
+                        <TableCell className="text-xs whitespace-nowrap">
+                          闁绘鐗婂﹢?{item._count.versions} / 闁瑰瓨鍔曢幉?{item._count.members}
+                        </TableCell>
+                        <TableCell className="text-xs whitespace-nowrap">{formatDateTime(item.updatedAt)}</TableCell>
+                      </TableRow>
+                    ))}
+              </TableBody>
+            </Table>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Sheet open={editOpen} onOpenChange={setEditOpen}>
+        <SheetContent side="right" className={sheetContentClassName}>
+          <SheetHeader>
+            <SheetTitle>缂傚倸鍊归悧鐐垫椤愶絾鍎熼柡鍐ㄥ€归弳?/SheetTitle>
+            <SheetDescription>{activeApp ? `闁圭厧鐡ㄥ濠氬极閵堝鏅?{activeApp.name}` : "缂傚倸鍊归悧鐐垫椤愶絾鍎熼柡鍐ㄥ€归弳蹇涙⒑閺夎法肖闁?}</SheetDescription>
+          </SheetHeader>
+          <div className="p-4">
+            <Card className="border-border/70 shadow-none">
+              <CardContent className="p-4">
+                <form className="space-y-3" onSubmit={editForm.handleSubmit(onSaveApp)}>
+                  <div className="space-y-2">
+                    <Label htmlFor="edit-name">闂佸憡鑹剧粔鎯扳叿</Label>
+                    <Input id="edit-name" {...editForm.register("name")} />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="edit-description">婵炲濮撮鍥╁垝?/Label>
+                    <Input id="edit-description" {...editForm.register("description")} />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="edit-week">闂佸憡绋忛崝灞界暦鏉堚晝鐭撴い鏍ㄨ壘閻?/Label>
+                    <Input id="edit-week" type="number" {...editForm.register("weekPoints", { valueAsNumber: true })} />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="edit-month">闂佸搫鐗嗛悧鍡楃暦鏉堚晝鐭撴い鏍ㄨ壘閻?/Label>
+                    <Input id="edit-month" type="number" {...editForm.register("monthPoints", { valueAsNumber: true })} />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="edit-year">濡ょ姷鍋炲娆忕暦鏉堚晝鐭撴い鏍ㄨ壘閻?/Label>
+                    <Input id="edit-year" type="number" {...editForm.register("yearPoints", { valueAsNumber: true })} />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="edit-life">濠殿喗锕㈤弲鑼不濞嗘垹鐭撴い鏍ㄨ壘閻?/Label>
+                    <Input id="edit-life" type="number" {...editForm.register("lifetimePoints", { valueAsNumber: true })} />
+                  </div>
+                  <Button className="w-full" type="submit" disabled={editForm.formState.isSubmitting}>
+                    {editForm.formState.isSubmitting ? "婵烇絽娲︾换鍌炴偤閵婏妇鈻?.." : "婵烇絽娲︾换鍌炴偤閵婏附鍎熼柡鍐ㄥ€归弳?}
+                  </Button>
+                </form>
+              </CardContent>
+            </Card>
+          </div>
+        </SheetContent>
+      </Sheet>
+
+      <Sheet open={versionOpen} onOpenChange={setVersionOpen}>
+        <SheetContent side="right" className={sheetContentClassName}>
+          <SheetHeader>
+            <SheetTitle>闂佸搫鍊瑰姗€路閸愵喗鍋嬮柛顐ゅ枑閹?/SheetTitle>
+            <SheetDescription>{activeApp ? `闁圭厧鐡ㄥ濠氬极閵堝鏅?{activeApp.name}` : "闂佸憡甯楃粙鎴犵磽閹捐妞界€光偓閳ь剟顢橀幖浣瑰仩闁糕剝鐟ラ。濂告煛?}</SheetDescription>
+          </SheetHeader>
+          <div className="p-4">
+            <Card className="border-border/70 shadow-none">
+              <CardContent className="space-y-4 p-4">
+                <form className="space-y-3" onSubmit={versionForm.handleSubmit(onCreateVersion)}>
+                  <div className="space-y-2">
+                    <Label htmlFor="new-version">闂佺粯顨呴悧濠傦耿娴兼潙鐭?/Label>
+                    <Input id="new-version" {...versionForm.register("version")} />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="new-version-url">婵炴垶鎸搁鍫澝归崶顒€鎹堕柡澶嬪缁?/Label>
+                    <Input id="new-version-url" {...versionForm.register("downloadUrl")} />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="new-version-note">闂佸搫娲ら悺銊╁蓟婵犲嫭瀚氶悗娑櫳戦～?/Label>
+                    <Input id="new-version-note" {...versionForm.register("releaseNote")} />
+                  </div>
+                  <Button className="w-full" type="submit" disabled={versionForm.formState.isSubmitting}>
+                    {versionForm.formState.isSubmitting ? "闂佸憡甯楃粙鎴犵磽閹惧鈻?.." : "闂佸憡甯楃粙鎴犵磽閹剧粯鍋嬮柛顐ゅ枑閹?}
+                  </Button>
+                </form>
+                <Separator />
+                {versions.length === 0 ? (
+                  <p className="text-sm text-muted-foreground">閻熸粎澧楅幐鍛婃櫠閻樿姹查柛灞剧⊕閿熴儵鏌ｅΔ鈧悧濠傦耿娴兼潙违?/p>
+                ) : (
+                  <div className="space-y-3">
+                    {versions.map((item) => (
+                      <Card className="border-border/70 shadow-none" key={item.id}>
+                        <CardContent className="space-y-2 p-4">
+                          <p className="text-sm font-medium">闂佺粯顨呴悧濠傦耿?{item.version}</p>
+                          <p className="text-xs text-muted-foreground break-all">{item.downloadUrl}</p>
+                          <p className="text-xs text-muted-foreground">{formatDateTime(item.createdAt)}</p>
+                          <div className="flex gap-2">
+                            <Button size="sm" type="button" variant="outline" onClick={() => void onEditVersion(item)}>
+                              缂傚倸鍊归悧鐐垫?                            </Button>
+                            <Button size="sm" type="button" variant="destructive" onClick={() => void onDeleteVersion(item)}>
+                              闂佸憡甯炴繛鈧繛?                            </Button>
+                          </div>
+                        </CardContent>
+                      </Card>
+                    ))}
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          </div>
+        </SheetContent>
+      </Sheet>
+
+      <Sheet open={policyOpen} onOpenChange={setPolicyOpen}>
+        <SheetContent side="right" className={sheetContentClassName}>
+          <SheetHeader>
+            <SheetTitle>闂佸搫娲ら悺銊╁蓟婵犲嫮椹抽柡宥庡亝濞?/SheetTitle>
+            <SheetDescription>{activeApp ? `闁圭厧鐡ㄥ濠氬极閵堝鏅?{activeApp.name}` : "闂備焦婢樼粔鍫曟偪閸℃ɑ鍎熼柡鍐ㄥ€归弳蹇涙煛閸パ呮憼闁哄苯锕︾划鐢稿冀椤愶絾顓?}</SheetDescription>
+          </SheetHeader>
+          <div className="p-4">
+            <Card className="border-border/70 shadow-none">
+              <CardContent className="p-4">
+                <form className="space-y-3" onSubmit={policyForm.handleSubmit(onSavePolicy)}>
+                  <div className="space-y-2">
+                    <Label htmlFor="policy-ttl">缂備礁鍊藉畷鐢稿吹鎼达絺鍋撻悷鎵Ш闁?TTL闂佹寧绋戦悧蹇涳綖濡ゅ懏鏅?/Label>
+                    <Input id="policy-ttl" type="number" {...policyForm.register("offlineTtlSeconds", { valueAsNumber: true })} />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="policy-version">閻庢鍠栭幖顐﹀春濡ゅ懎鍗抽悗娑櫳戦悡鈧梺鍝勭墐閸嬫挸霉閿濆懏鎹ｅ褎顨婂鐢割敆婵犲嫮顦╅梺鍛婄懐閸ㄥ爼鍩€椤掆偓椤р偓缂?/Label>
+                    <Input id="policy-version" {...policyForm.register("forceUpdateMinVersion")} />
+                  </div>
+                  <Button className="w-full" type="submit" disabled={policyForm.formState.isSubmitting}>
+                    {policyForm.formState.isSubmitting ? "婵烇絽娲︾换鍌炴偤閵婏妇鈻?.." : "婵烇絽娲︾换鍌炴偤閵娾晛鍗抽悗娑櫳戦悡鈧紓浣圭⊕閻楁粓寮?}
+                  </Button>
+                </form>
+              </CardContent>
+            </Card>
+          </div>
+        </SheetContent>
+      </Sheet>
+
+      <Sheet open={sdkOpen} onOpenChange={setSdkOpen}>
+        <SheetContent side="right" className={sheetContentClassName}>
+          <SheetHeader>
+            <SheetTitle>SDK 婵炴垶鎸告鎼佹儊閹达附鐓㈤柕澹苯鎮侀梺?/SheetTitle>
+            <SheetDescription>{activeApp ? `闁圭厧鐡ㄥ濠氬极閵堝鏅?{activeApp.name}` : "缂備胶濯寸槐鏇㈠箖?SDK 婵炴垶鎸告鎼佹儊閹达附鐓?}</SheetDescription>
+          </SheetHeader>
+          <div className="p-4">
+            <Card className="border-border/70 shadow-none">
+              <CardContent className="space-y-3 p-4">
+                <div className="space-y-1">
+                  <p className="text-xs text-muted-foreground">SDK 闂佸搫绉村ú鈺呮儊?/p>
+                  <p className="font-mono text-xs break-all">{sdkInfo?.sdkKey ?? "-"}</p>
+                </div>
+                <div className="space-y-1">
+                  <p className="text-xs text-muted-foreground">SDK 闁诲酣娼уΛ婵嬪箰濠婂牊鏅柛顐犲労閺嗘洟鎮峰▎蹇曞⒊缂?/p>
+                  <p className="font-mono text-xs break-all">{sdkInfo?.sdkSecretPreview ?? "-"}</p>
+                </div>
+                <div className="space-y-1">
+                  <p className="text-xs text-muted-foreground">闂佸搫娲ら悺銊╁蓟婵犲嫮椹抽柟顖嗗嫬鈧娊鎮楅棃娑欘棦闁瑰憡绮撻弫宥夊醇閵夘喗娈ㄩ柣鐔哥懃閻楃偟妲?/p>
+                  <p className="font-mono text-xs break-all">{sdkInfo?.updateSignSecretPreview ?? "-"}</p>
+                </div>
+                <Separator />
+                <div className="grid gap-2">
+                  <Button type="button" variant="outline" onClick={onDownloadSdk} disabled={downloadingSdk}>
+                    {downloadingSdk ? "婵炴垶鎸搁鍫澝归崶銊р枖?.." : "婵炴垶鎸搁鍫澝?PHP SDK"}
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    disabled={Boolean(rotating)}
+                    onClick={() => void onRotateSecrets("SDK_SECRET")}
+                  >
+                    {rotating === "SDK_SECRET" ? "闁哄鍎愰崰妤€鐣烽崣澶屸枖?.." : "闁哄鍎愰崰妤€鐣?SDK 闁诲酣娼уΛ婵嬪箰?}
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    disabled={Boolean(rotating)}
+                    onClick={() => void onRotateSecrets("UPDATE_SIGN_SECRET")}
+                  >
+                    {rotating === "UPDATE_SIGN_SECRET" ? "闁哄鍎愰崰妤€鐣烽崣澶屸枖?.." : "闁哄鍎愰崰妤€鐣烽弻銉ュ嵆閻庢稒蓱閻撯偓缂備焦绋掗崕鎶藉箖閺囩姭鍋撻棃娑欘棦闁?}
+                  </Button>
+                  <Button type="button" disabled={Boolean(rotating)} onClick={() => void onRotateSecrets("BOTH")}>
+                    {rotating === "BOTH" ? "闁哄鍎愰崰妤€鐣烽崣澶屸枖?.." : "闂佸憡鑹鹃張顒€顪冮崒娑欏妞ゆ棁妫勬惔濠傗槈閹惧崬鈧锝為幒鏂哄亾闂堟稒顥㈤柟?}
+                  </Button>
+                </div>
+                {rotateResult ? (
+                  <Alert>
+                    <AlertTitle>闂佸搫鍊瑰姗€鎯侀幋锔界參闁靛鍨崇粈鍕归悩鍙夊櫤婵☆垰顦辩划鍫熸姜閹殿噮浼囧┑鐐叉濡插嫮妲?/AlertTitle>
+                    <AlertDescription className="space-y-1 text-xs">
+                      {rotateResult.sdkSecret ? <p className="font-mono break-all">SDK 闁诲酣娼уΛ婵嬪箰? {rotateResult.sdkSecret}</p> : null}
+                      {rotateResult.updateSignSecret ? (
+                        <p className="font-mono break-all">闂佸搫娲ら悺銊╁蓟婵犲嫮椹抽柟顖嗗嫬鈧娊鎮楅棃娑欘棦闁? {rotateResult.updateSignSecret}</p>
+                      ) : null}
+                      <p>闁哄鍎愰崰妤€鐣烽弻銉ョ睄闁割偅娲橀敍鐔兼煥濞戞瑯鍔痜ormatDateTime(rotateResult.rotatedAt)}</p>
+                    </AlertDescription>
+                  </Alert>
+                ) : null}
+              </CardContent>
+            </Card>
+          </div>
+        </SheetContent>
+      </Sheet>
+
+      <Sheet open={membersOpen} onOpenChange={setMembersOpen}>
+        <SheetContent side="right" className={membersSheetContentClassName}>
+          <SheetHeader>
+            <SheetTitle>闂佺懓鐡ㄩ崝鏇㈠箟瀹曞洨涓嶉柨娑樺閸?/SheetTitle>
+            <SheetDescription>{activeApp ? `闁圭厧鐡ㄥ濠氬极閵堝鏅?{activeApp.name}` : "闂佸搫琚崕鍐诧耿閸涱喗鍎熼柡鍐ㄥ€归弳蹇涙煙鐎涙ê濮囬柟?}</SheetDescription>
+          </SheetHeader>
+          <div className="p-4">
+            <Card className="border-border/70 shadow-none">
+              <CardContent className="p-4">
+                {members.length === 0 ? (
+                  <p className="text-sm text-muted-foreground">閻熸粎澧楅幐鍛婃櫠閻樿櫕鍎熼柡鍐ㄥ€归弳蹇涙煛閸℃鈧懓螞閵堝绠ｉ柟閭﹀墯閸犲懘鏌?/p>
+                ) : (
+                  <div className="w-full overflow-x-auto">
+                    <Table className="w-full table-fixed [&_th]:px-2 [&_td]:px-2">
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead className="w-[72%]">闂備緡鍙庨崰姘额敊?/TableHead>
+                          <TableHead className="w-[28%]">闁荤喐鐟︾敮鐔哥珶?/TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {members.map((member) => (
+                          <TableRow key={`${member.userId}:${member.role}`}>
+                            <TableCell className="max-w-0 truncate" title={member.user.email}>
+                              {member.user.email}
+                            </TableCell>
+                            <TableCell className="whitespace-nowrap">{getMemberRoleLabel(member.role)}</TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          </div>
+        </SheetContent>
+      </Sheet>
+
+      <Sheet open={discountOpen} onOpenChange={setDiscountOpen}>
+        <SheetContent side="right" className={sheetContentClassName}>
+          <SheetHeader>
+            <SheetTitle>闂佺懓鐡ㄩ崝鏇㈠箟閹惰棄绠俊顖濐嚙閳?/SheetTitle>
+            <SheetDescription>{activeApp ? `闁圭厧鐡ㄥ濠氬极閵堝鏅?{activeApp.name}` : "闂備焦婢樼粔鍫曟偪閸℃稑绠ｉ柟閭﹀墯閸犲懘鏌熼懜鐬垶鏅?}</SheetDescription>
+          </SheetHeader>
+          <div className="space-y-3 p-4">
+            {discounts.length === 0 ? (
+              <p className="text-sm text-muted-foreground">闂佸搫妫楅崐鐟拔涢妶澶婄婵☆垵顕ч埛蹇涙⒑閺夎法肖闁汇倕妫濇俊?/p>
+            ) : (
+              discounts.map((item) => (
+                <Card className="border-border/70 shadow-none" key={item.userId}>
+                  <CardContent className="space-y-2 p-4">
+                    <p className="text-sm font-medium">{item.email}</p>
+                    <p className="text-xs text-muted-foreground">{getDiscountRoleLabel(item.role)}</p>
+                    <div className="flex items-center gap-2">
+                      <Input
+                        type="number"
+                        step="0.01"
+                        min="0"
+                        max="1"
+                        value={discountDrafts[item.userId] ?? ""}
+                        onChange={(event) => {
+                          setDiscountDrafts((prev) => ({ ...prev, [item.userId]: event.target.value }));
+                        }}
+                      />
+                      <Button
+                        size="sm"
+                        type="button"
+                        disabled={savingDiscountUserId === item.userId}
+                        onClick={() => void onSaveDiscount(item.userId)}
+                      >
+                        {savingDiscountUserId === item.userId ? "婵烇絽娲︾换鍌炴偤閵婏妇鈻?.." : "婵烇絽娲︾换鍌炴偤?}
+                      </Button>
+                    </div>
+                  </CardContent>
+                </Card>
+              ))
+            )}
+          </div>
+        </SheetContent>
+      </Sheet>
+    </div>
+  );
+}

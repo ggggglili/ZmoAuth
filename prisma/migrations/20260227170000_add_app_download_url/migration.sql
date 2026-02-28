@@ -1,0 +1,2 @@
+ALTER TABLE "App"
+ADD COLUMN "downloadUrl" TEXT;

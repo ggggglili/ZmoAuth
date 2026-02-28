@@ -1,0 +1,259 @@
+generator client {
+  provider   = "prisma-client-js"
+  engineType = "binary"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum PlatformRole {
+  SUPER_ADMIN
+  USER
+}
+
+enum AppMemberRole {
+  OWNER
+  RESELLER
+  MEMBER
+}
+
+enum InviteIssuerType {
+  SUPER_ADMIN
+  RESELLER
+}
+
+enum PointTransactionType {
+  RECHARGE
+  PURCHASE
+  REFUND
+  ADJUST
+  TRANSFER_OUT
+  TRANSFER_IN
+}
+
+enum PlanType {
+  WEEK
+  MONTH
+  YEAR
+  LIFETIME
+}
+
+enum OrderStatus {
+  PENDING
+  PAID
+  CANCELED
+}
+
+enum LicenseStatus {
+  ACTIVE
+  EXPIRED
+  REVOKED
+}
+
+enum BindingTargetType {
+  DOMAIN
+  IP_PORT
+}
+
+model User {
+  id                String             @id @default(uuid())
+  email             String             @unique
+  passwordHash      String
+  role              PlatformRole       @default(USER)
+  createdAt         DateTime           @default(now())
+  wallet            Wallet?
+  appMembers        AppMember[]
+  resellerDiscounts AppResellerDiscount[]
+  pointTransactions PointTransaction[]
+  orders            Order[]
+  licenses          License[]
+  auditLogs         AuditLog[]
+}
+
+model Wallet {
+  id           String   @id @default(uuid())
+  userId       String   @unique
+  pointBalance Int      @default(0)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model Invite {
+  id           String          @id @default(uuid())
+  code         String          @unique
+  issuerType   InviteIssuerType
+  issuerUserId String
+  appId        String?
+  maxUses      Int             @default(10)
+  usedCount    Int             @default(0)
+  expiresAt    DateTime
+  isRevoked    Boolean         @default(false)
+  createdAt    DateTime        @default(now())
+  app          App?            @relation(fields: [appId], references: [id], onDelete: SetNull)
+
+  @@index([expiresAt])
+}
+
+model App {
+  id                String               @id @default(uuid())
+  name              String
+  description       String?
+  downloadUrl       String?
+  weekPoints        Int
+  monthPoints       Int
+  yearPoints        Int
+  lifetimePoints    Int
+  sdkKey            String               @unique @default(uuid())
+  sdkSecret         String               @default(uuid())
+  previousSdkSecret String?
+  previousSdkSecretExpiresAt DateTime?
+  updateSignSecret  String               @default(uuid())
+  previousUpdateSignSecret String?
+  previousUpdateSignSecretExpiresAt DateTime?
+  isDeleted         Boolean              @default(false)
+  createdAt         DateTime             @default(now())
+  updatedAt         DateTime             @updatedAt
+  versions          AppVersion[]
+  members           AppMember[]
+  resellerDiscounts AppResellerDiscount[]
+  invites           Invite[]
+  updatePolicy      AppUpdatePolicy?
+  orders            Order[]
+  licenses          License[]
+}
+
+model AppVersion {
+  id          String   @id @default(uuid())
+  appId       String
+  version     String
+  downloadUrl String
+  releaseNote String?
+  createdAt   DateTime @default(now())
+  app         App      @relation(fields: [appId], references: [id], onDelete: Cascade)
+
+  @@unique([appId, version])
+}
+
+model AppMember {
+  id                   String        @id @default(uuid())
+  appId                String
+  userId               String
+  role                 AppMemberRole
+  parentResellerUserId String?
+  createdAt            DateTime      @default(now())
+  updatedAt            DateTime      @updatedAt
+  app                  App           @relation(fields: [appId], references: [id], onDelete: Cascade)
+  user                 User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([appId, userId])
+  @@index([appId, parentResellerUserId])
+}
+
+model AppResellerDiscount {
+  id           String   @id @default(uuid())
+  appId        String
+  userId       String
+  discountRate Decimal  @db.Decimal(5, 4)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  app          App      @relation(fields: [appId], references: [id], onDelete: Cascade)
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([appId, userId])
+  @@index([userId])
+}
+
+model PointTransaction {
+  id            String               @id @default(uuid())
+  userId        String
+  type          PointTransactionType
+  amount        Int
+  operatorId    String
+  referenceType String
+  referenceId   String
+  createdAt     DateTime             @default(now())
+  user          User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+}
+
+model AppUpdatePolicy {
+  id                    String   @id @default(uuid())
+  appId                 String   @unique
+  offlineTtlSeconds     Int      @default(900)
+  forceUpdateMinVersion String?
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+  app                   App      @relation(fields: [appId], references: [id], onDelete: Cascade)
+}
+
+model Order {
+  id           String      @id @default(uuid())
+  userId       String
+  appId        String
+  planType     PlanType
+  basePoints   Int
+  discountRate Decimal     @db.Decimal(5, 4)
+  finalPoints  Int
+  status       OrderStatus @default(PENDING)
+  paidAt       DateTime?
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+  user         User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  app          App         @relation(fields: [appId], references: [id], onDelete: Cascade)
+  license      License?
+
+  @@index([userId, createdAt])
+  @@index([appId, createdAt])
+}
+
+model License {
+  id           String        @id @default(uuid())
+  orderId      String        @unique
+  userId       String
+  appId        String
+  licenseKey   String        @unique
+  status       LicenseStatus @default(ACTIVE)
+  expiresAt    DateTime?
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+  order        Order         @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  app          App           @relation(fields: [appId], references: [id], onDelete: Cascade)
+  bindings     LicenseBinding[]
+
+  @@index([userId, createdAt])
+  @@index([appId, createdAt])
+}
+
+model LicenseBinding {
+  id         String            @id @default(uuid())
+  licenseId  String
+  targetType BindingTargetType
+  bindTarget String
+  isActive   Boolean           @default(true)
+  boundAt    DateTime          @default(now())
+  unboundAt  DateTime?
+  createdAt  DateTime          @default(now())
+  updatedAt  DateTime          @updatedAt
+  license    License           @relation(fields: [licenseId], references: [id], onDelete: Cascade)
+
+  @@index([licenseId, isActive])
+}
+
+model AuditLog {
+  id           String   @id @default(uuid())
+  actorId      String?
+  action       String
+  resourceType String
+  resourceId   String?
+  details      Json?
+  createdAt    DateTime @default(now())
+  actor        User?    @relation(fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([createdAt])
+  @@index([actorId, createdAt])
+}
